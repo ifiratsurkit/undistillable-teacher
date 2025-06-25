@@ -4,16 +4,18 @@ import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
 from torchvision.models import resnet18
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
 import os
 
 # Hyperparameters
 EPOCHS = 20
 BATCH_SIZE = 128
 LEARNING_RATE = 0.01
-TEMPERATURE = 4.0
-ALPHA = 0.5
+TEMPERATURE = 5.0
+ALPHA = 0.7
+MODEL_PATH = "checkpoints/student_from_nasty.pth"
 TEACHER_PATH = "checkpoints/nasty_teacher.pth"
-STUDENT_SAVE_PATH = "checkpoints/student_from_nasty.pth"
 
 # Data preparation
 transform = transforms.Compose([
@@ -21,17 +23,13 @@ transform = transforms.Compose([
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
 
-trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
-                                         download=True, transform=transform)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=BATCH_SIZE,
-                                           shuffle=True, num_workers=2)
+trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
 
-testset = torchvision.datasets.CIFAR10(root='./data', train=False,
-                                        download=True, transform=transform)
-testloader = torch.utils.data.DataLoader(testset, batch_size=BATCH_SIZE,
-                                          shuffle=False, num_workers=2)
+testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+testloader = torch.utils.data.DataLoader(testset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
-# Define models
+# Define student model
 class StudentNet(nn.Module):
     def __init__(self):
         super(StudentNet, self).__init__()
@@ -41,73 +39,111 @@ class StudentNet(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-class NastyTeacherNet(nn.Module):
+# Define nasty teacher model structure
+class NastyTeacher(nn.Module):
     def __init__(self):
-        super(NastyTeacherNet, self).__init__()
+        super(NastyTeacher, self).__init__()
         self.model = resnet18(weights=None)
         self.model.fc = nn.Linear(self.model.fc.in_features, 10)
 
     def forward(self, x):
         return self.model(x)
 
-# Knowledge Distillation Loss
-def kd_loss(student_logits, teacher_logits, labels):
-    T = TEMPERATURE
-    alpha = ALPHA
-    ce_loss = nn.CrossEntropyLoss()(student_logits, labels)
-    kl_loss = nn.KLDivLoss(reduction="batchmean")(nn.functional.log_softmax(student_logits/T, dim=1),
-                                                   nn.functional.softmax(teacher_logits/T, dim=1))
-    return alpha * ce_loss + (1. - alpha) * kl_loss * T * T
+def distillation_loss(student_logits, teacher_logits, labels, T, alpha):
+    soft_loss = nn.KLDivLoss(reduction='batchmean')(
+        F.log_softmax(student_logits / T, dim=1),
+        F.softmax(teacher_logits / T, dim=1)
+    ) * (T * T)
+    hard_loss = F.cross_entropy(student_logits, labels)
+    return alpha * soft_loss + (1 - alpha) * hard_loss
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    teacher = NastyTeacherNet().to(device)
+    student = StudentNet().to(device)
+    teacher = NastyTeacher().to(device)
     teacher.load_state_dict(torch.load(TEACHER_PATH))
     teacher.eval()
 
-    student = StudentNet().to(device)
     optimizer = optim.SGD(student.parameters(), lr=LEARNING_RATE, momentum=0.9)
+
+    epoch_losses = []
+    epoch_accuracies = []
 
     for epoch in range(EPOCHS):
         student.train()
         running_loss = 0.0
+        correct = 0
+        total = 0
+
         for inputs, labels in trainloader:
             inputs, labels = inputs.to(device), labels.to(device)
+
             with torch.no_grad():
                 teacher_outputs = teacher(inputs)
+
             student_outputs = student(inputs)
-            loss = kd_loss(student_outputs, teacher_outputs, labels)
+            loss = distillation_loss(student_outputs, teacher_outputs, labels, TEMPERATURE, ALPHA)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item()
-        print(f"[Student from Nasty] Epoch {epoch+1} loss: {running_loss/len(trainloader):.4f}")
+            _, predicted = torch.max(student_outputs.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
 
+        avg_loss = running_loss / len(trainloader)
+        accuracy = 100 * correct / total
+        epoch_losses.append(avg_loss)
+        epoch_accuracies.append(accuracy)
+
+        print(f"Epoch {epoch+1}/{EPOCHS} - Loss: {avg_loss:.4f} - Accuracy: {accuracy:.2f}%")
+
+    # Save student model
     os.makedirs("checkpoints", exist_ok=True)
-    torch.save(student.state_dict(), STUDENT_SAVE_PATH)
-    print(f"Student (from nasty teacher) model saved to {STUDENT_SAVE_PATH}")
+    torch.save(student.state_dict(), MODEL_PATH)
+    print(f"Student-from-nasty model saved to {MODEL_PATH}")
+
+    # Save plots
+    os.makedirs("outputs", exist_ok=True)
+
+    plt.figure()
+    plt.plot(range(1, EPOCHS+1), epoch_losses, label='Loss', color='purple')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training Loss (Student from Nasty Teacher)")
+    plt.grid(True)
+    plt.savefig("outputs/student_from_nasty_loss.png")
+
+    plt.figure()
+    plt.plot(range(1, EPOCHS+1), epoch_accuracies, label='Accuracy', color='darkorange')
+    plt.xlabel("Epoch")
+    plt.ylabel("Accuracy (%)")
+    plt.title("Training Accuracy (Student from Nasty Teacher)")
+    plt.grid(True)
+    plt.savefig("outputs/student_from_nasty_accuracy.png")
+
+    print("Training plots saved to outputs/")
 
 def test():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    student = StudentNet().to(device)
-    student.load_state_dict(torch.load(STUDENT_SAVE_PATH))
-    student.eval()
+    model = StudentNet().to(device)
+    model.load_state_dict(torch.load(MODEL_PATH))
+    model.eval()
 
     correct = 0
     total = 0
     with torch.no_grad():
         for images, labels in testloader:
             images, labels = images.to(device), labels.to(device)
-            outputs = student(images)
+            outputs = model(images)
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
-    print(f"Student (from nasty teacher) Test Accuracy: {100 * correct / total:.2f}%")
+    print(f"Test Accuracy (Student from Nasty Teacher): {100 * correct / total:.2f}%")
 
 if __name__ == '__main__':
     train()
     test()
-
