@@ -193,3 +193,4 @@ cython_debug/
 .cursorignore
 .cursorindexingignorecheckpoints/
 # Ignore model checkpoint directory
+# Ignore model checkpoint directory 2
