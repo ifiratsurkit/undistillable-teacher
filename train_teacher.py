@@ -4,7 +4,7 @@ import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
 from torchvision.models import resnet18
-import matplotlib.pyplot as plt
+from tqdm import tqdm
 import os
 
 # Hyperparameters
@@ -41,63 +41,29 @@ def train():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE, momentum=0.9)
 
-    epoch_losses = []
-    epoch_accuracies = []
-
     for epoch in range(EPOCHS):
         model.train()
         running_loss = 0.0
-        correct = 0
-        total = 0
-
-        for inputs, labels in trainloader:
+        print(f"\nEpoch {epoch+1}/{EPOCHS}")
+        progress_bar = tqdm(trainloader, desc="Training", leave=False)
+        for inputs, labels in progress_bar:
             inputs, labels = inputs.to(device), labels.to(device)
 
-            # Forward + backward + optimize
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
 
-            # Accumulate loss and accuracy
             running_loss += loss.item()
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            progress_bar.set_postfix(loss=loss.item())
 
         avg_loss = running_loss / len(trainloader)
-        accuracy = 100 * correct / total
-        epoch_losses.append(avg_loss)
-        epoch_accuracies.append(accuracy)
+        print(f"Epoch {epoch+1} average loss: {avg_loss:.4f}")
 
-        print(f"Epoch {epoch+1}/{EPOCHS} - Loss: {avg_loss:.4f} - Accuracy: {accuracy:.2f}%")
-
-    # Save model
     os.makedirs("checkpoints", exist_ok=True)
     torch.save(model.state_dict(), MODEL_PATH)
     print(f"Model saved to {MODEL_PATH}")
-
-    # Save plots
-    os.makedirs("outputs", exist_ok=True)
-
-    plt.figure()
-    plt.plot(range(1, EPOCHS+1), epoch_losses, label='Loss', color='red')
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.title("Training Loss (Teacher)")
-    plt.grid(True)
-    plt.savefig("outputs/teacher_loss.png")
-
-    plt.figure()
-    plt.plot(range(1, EPOCHS+1), epoch_accuracies, label='Accuracy', color='green')
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy (%)")
-    plt.title("Training Accuracy (Teacher)")
-    plt.grid(True)
-    plt.savefig("outputs/teacher_accuracy.png")
-
-    print("Training plots saved to outputs/")
 
 def test():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
